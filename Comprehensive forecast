@@ -1,0 +1,276 @@
+import requests
+import xml.etree.ElementTree as ET
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from tabulate import tabulate
+
+def get_weather_forecast(location):
+    """
+    Get weather forecast for a location from WeatherAPI.com
+    
+    Args:
+        location: City name or query string (e.g., "Vancouver, BC", "Gibsons, BC")
+    """
+    # Using the provided API key
+    api_key = "7f6983dedbb34152bb4221659251003"
+    url = f"http://api.weatherapi.com/v1/forecast.json?key={api_key}&q={location}&days=2"
+    
+    response = requests.get(url)
+    if response.status_code != 200:
+        print(f"Error: Unable to fetch weather data for {location}. Status code: {response.status_code}")
+        return None
+    
+    return response.json()
+
+def create_forecast_table(weather_data):
+    """Create a DataFrame with tomorrow's hourly forecast (9am-9pm)"""
+    if not weather_data:
+        return None
+    
+    # Get tomorrow's date
+    tomorrow = datetime.now().date() + timedelta(days=1)
+    
+    # Extract hourly forecast for tomorrow (9am to 9pm only)
+    tomorrow_forecast = []
+    for hour_data in weather_data['forecast']['forecastday'][1]['hour']:
+        hour_time = datetime.fromisoformat(hour_data['time'].replace('Z', '+00:00'))
+        hour = int(hour_time.strftime('%H'))
+        
+        # Only include hours between 9am and 9pm (9-21)
+        if 9 <= hour <= 21:
+            # Format wind as requested: speed + direction without spaces
+            wind_mph = round(hour_data['wind_mph'])  # Round to nearest whole number
+            wind_dir = hour_data['wind_dir']
+            
+            # Create a row for each hour
+            tomorrow_forecast.append({
+                'Time': hour_time.strftime('%I %p').lstrip('0'),  # Format: 1 AM, 2 PM, etc. (no leading zero)
+                'Temp (°C)': round(hour_data['temp_c'], 1),  # Round to 1 decimal place
+                'Condition': hour_data['condition']['text'],
+                'Humidity (%)': hour_data['humidity'],
+                'Wind (MPH)': f"{wind_mph}{wind_dir}"
+            })
+    
+    # Create a DataFrame
+    return pd.DataFrame(tomorrow_forecast)
+
+def create_temperature_gradient_table(location_data):
+    """Create a table showing the temperature gradient between locations"""
+    # Extract hours and temperatures for each location
+    hours = []
+    temps_by_location = {}
+    
+    for location, data in location_data.items():
+        if data is None:
+            temps_by_location[location] = []
+            continue
+            
+        location_temps = []
+        for hour_data in data['forecast']['forecastday'][1]['hour']:
+            hour_time = datetime.fromisoformat(hour_data['time'].replace('Z', '+00:00'))
+            hour = int(hour_time.strftime('%H'))
+            
+            # Only include hours between 9am and 9pm (9-21)
+            if 9 <= hour <= 21:
+                if hour not in hours:
+                    hours.append(hour)
+                location_temps.append({
+                    'hour': hour,
+                    'temp': round(hour_data['temp_c'], 1)
+                })
+        
+        # Convert to dict for easier lookup
+        temps_by_location[location] = {item['hour']: item['temp'] for item in location_temps}
+    
+    # Sort hours
+    hours.sort()
+    
+    # Create gradient table
+    gradient_rows = []
+    locations = list(location_data.keys())
+    
+    for hour in hours:
+        hour_format = datetime(2000, 1, 1, hour).strftime('%I %p').lstrip('0')
+        row = {'Time': hour_format}
+        
+        # Add temperature for each location
+        for location in locations:
+            if location in temps_by_location and hour in temps_by_location[location]:
+                row[location] = temps_by_location[location][hour]
+            else:
+                row[location] = np.nan
+        
+        # Calculate gradients between locations
+        if len(locations) >= 2:
+            for i in range(len(locations)-1):
+                loc1 = locations[i]
+                loc2 = locations[i+1]
+                if loc1 in temps_by_location and loc2 in temps_by_location and hour in temps_by_location[loc1] and hour in temps_by_location[loc2]:
+                    diff = temps_by_location[loc2][hour] - temps_by_location[loc1][hour]
+                    row[f"{loc1} → {loc2}"] = f"{diff:+.1f}"
+                else:
+                    row[f"{loc1} → {loc2}"] = np.nan
+        
+        gradient_rows.append(row)
+    
+    return pd.DataFrame(gradient_rows)
+
+def get_marine_forecast(rss_url, region_filter):
+    """
+    Get marine forecasts from Environment Canada RSS feed for a specific region
+    
+    Args:
+        rss_url: URL of the RSS feed
+        region_filter: Text to search for in the title to filter by region
+    """
+    try:
+        response = requests.get(rss_url)
+        response.raise_for_status()
+        
+        # Define namespace
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        
+        # Parse XML
+        root = ET.fromstring(response.content)
+        
+        # Find entries for the specified region
+        forecasts = []
+        
+        for entry in root.findall('.//atom:entry', ns):
+            title = entry.find('atom:title', ns).text
+            if region_filter in title:
+                summary = entry.find('atom:summary', ns).text
+                published = entry.find('atom:published', ns).text
+                
+                # Format the date
+                try:
+                    date_obj = datetime.strptime(published, "%Y-%m-%dT%H:%M:%SZ")
+                    local_time = date_obj.strftime("%Y-%m-%d %H:%M")
+                except:
+                    local_time = published
+                
+                # Get the issue time from the summary if available
+                issue_time = ""
+                if "Issued" in summary:
+                    issue_time = summary.split("Issued")[-1].strip()
+                
+                forecasts.append({
+                    'Title': title,
+                    'Forecast': summary.split('<br/>')[0].strip(),
+                    'Published': local_time,
+                    'Issue Time': issue_time
+                })
+        
+        return forecasts
+    except requests.RequestException as e:
+        print(f"Error retrieving forecast: {e}")
+        return []
+    except ET.ParseError as e:
+        print(f"Error parsing XML: {e}")
+        return []
+
+def display_comprehensive_forecast():
+    tomorrow = datetime.now().date() + timedelta(days=1)
+    tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+    
+    print("\n" + "=" * 75)
+    print(f"COMPREHENSIVE WEATHER FORECAST FOR {tomorrow_str}")
+    print("=" * 75)
+    
+    # ===== MARINE FORECASTS =====
+    print("\n" + "=" * 75)
+    print("MARINE FORECASTS")
+    print("=" * 75)
+    
+    # Get Strait of Georgia - south of Nanaimo forecasts
+    strait_rss_url = "https://weather.gc.ca/rss/marine/14300_e.xml"
+    print("\nStrait of Georgia - South of Nanaimo")
+    print("-" * 50)
+    
+    strait_forecasts = get_marine_forecast(strait_rss_url, "Strait of Georgia - south of Nanaimo")
+    
+    if strait_forecasts:
+        for forecast in strait_forecasts:
+            print(f"\n{forecast['Title']}")
+            print("-" * 40)
+            print(f"Forecast: {forecast['Forecast']}")
+            if forecast['Issue Time']:
+                print(f"Issued: {forecast['Issue Time']}")
+            print()
+    else:
+        print("No forecasts available for Strait of Georgia.")
+    
+    # Get Howe Sound forecasts
+    howe_rss_url = "https://weather.gc.ca/rss/marine/06400_e.xml"
+    print("\nHowe Sound")
+    print("-" * 50)
+    
+    howe_forecasts = get_marine_forecast(howe_rss_url, "Howe Sound")
+    
+    if howe_forecasts:
+        for forecast in howe_forecasts:
+            print(f"\n{forecast['Title']}")
+            print("-" * 40)
+            print(f"Forecast: {forecast['Forecast']}")
+            if forecast['Issue Time']:
+                print(f"Issued: {forecast['Issue Time']}")
+            print()
+    else:
+        print("No forecasts available for Howe Sound.")
+    
+    # ===== LAND TEMPERATURE FORECASTS =====
+    print("\n" + "=" * 75)
+    print("LAND TEMPERATURE FORECASTS")
+    print("=" * 75)
+    
+    # Define locations - updated to include Vancouver and Gibsons
+    locations = [
+        "Vancouver, BC",
+        "Gibsons, BC",
+        "Squamish, BC",
+        "Whistler, BC"
+    ]
+    
+    # Get short location names for display
+    short_names = {
+        "Vancouver, BC": "Vancouver",
+        "Gibsons, BC": "Gibsons",
+        "Squamish, BC": "Squamish",
+        "Whistler, BC": "Whistler"
+    }
+    
+    # Get weather data for all locations
+    location_data = {}
+    forecast_tables = {}
+    
+    for location in locations:
+        weather_data = get_weather_forecast(location)
+        location_data[short_names[location]] = weather_data
+        if weather_data:
+            forecast_tables[location] = create_forecast_table(weather_data)
+    
+    # Create and display temperature gradient table
+    print(f"\nHourly Temperature Gradient (°C) - {tomorrow_str} (9am-9pm)")
+    print("-" * 75)
+    
+    gradient_table = create_temperature_gradient_table(location_data)
+    if not gradient_table.empty:
+        print(tabulate(gradient_table, headers='keys', tablefmt='fancy_grid', showindex=False))
+    else:
+        print("Unable to create temperature gradient table.")
+    
+    # Display detailed forecasts for each location
+    print("\nDetailed Hourly Forecasts")
+    
+    for location in locations:
+        print(f"\n{location}")
+        print("-" * 50)
+        
+        if location in forecast_tables and forecast_tables[location] is not None:
+            print(tabulate(forecast_tables[location], headers='keys', tablefmt='fancy_grid', showindex=False))
+        else:
+            print(f"No forecast data available for {location}.")
+
+if __name__ == "__main__":
+    display_comprehensive_forecast()
