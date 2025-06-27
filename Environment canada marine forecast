@@ -1,0 +1,98 @@
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime
+
+def get_marine_forecast(rss_url, region_filter):
+    """
+    Get marine forecasts from Environment Canada RSS feed for a specific region
+    
+    Args:
+        rss_url: URL of the RSS feed
+        region_filter: Text to search for in the title to filter by region
+    """
+    try:
+        response = requests.get(rss_url)
+        response.raise_for_status()
+        
+        # Define namespace
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        
+        # Parse XML
+        root = ET.fromstring(response.content)
+        
+        # Find entries for the specified region
+        forecasts = []
+        
+        for entry in root.findall('.//atom:entry', ns):
+            title = entry.find('atom:title', ns).text
+            if region_filter in title:
+                summary = entry.find('atom:summary', ns).text
+                published = entry.find('atom:published', ns).text
+                
+                # Format the date
+                try:
+                    date_obj = datetime.strptime(published, "%Y-%m-%dT%H:%M:%SZ")
+                    local_time = date_obj.strftime("%Y-%m-%d %H:%M")
+                except:
+                    local_time = published
+                
+                # Get the issue time from the summary if available
+                issue_time = ""
+                if "Issued" in summary:
+                    issue_time = summary.split("Issued")[-1].strip()
+                
+                forecasts.append({
+                    'Title': title,
+                    'Forecast': summary.split('<br/>')[0].strip(),
+                    'Published': local_time,
+                    'Issue Time': issue_time
+                })
+        
+        return forecasts
+    except requests.RequestException as e:
+        print(f"Error retrieving forecast: {e}")
+        return []
+    except ET.ParseError as e:
+        print(f"Error parsing XML: {e}")
+        return []
+
+def display_marine_forecasts():
+    strait_rss_url = "https://weather.gc.ca/rss/marine/14300_e.xml"
+    howe_rss_url = "https://weather.gc.ca/rss/marine/06400_e.xml"
+    
+    # Get Strait of Georgia - south of Nanaimo forecasts
+    print("\nStrait of Georgia - South of Nanaimo: Marine Weather")
+    print("=" * 75)
+    
+    strait_forecasts = get_marine_forecast(strait_rss_url, "Strait of Georgia - south of Nanaimo")
+    
+    if strait_forecasts:
+        for forecast in strait_forecasts:
+            print(f"\n{forecast['Title']}")
+            print("-" * 75)
+            print(f"Forecast: {forecast['Forecast']}")
+            if forecast['Issue Time']:
+                print(f"Issued: {forecast['Issue Time']}")
+            print()
+    else:
+        print("No forecasts available for Strait of Georgia.")
+    
+    # Get Howe Sound forecasts
+    print("\nHowe Sound: Marine Weather")
+    print("=" * 75)
+    
+    howe_forecasts = get_marine_forecast(howe_rss_url, "Howe Sound")
+    
+    if howe_forecasts:
+        for forecast in howe_forecasts:
+            print(f"\n{forecast['Title']}")
+            print("-" * 75)
+            print(f"Forecast: {forecast['Forecast']}")
+            if forecast['Issue Time']:
+                print(f"Issued: {forecast['Issue Time']}")
+            print()
+    else:
+        print("No forecasts available for Howe Sound.")
+
+if __name__ == "__main__":
+    display_marine_forecasts()
